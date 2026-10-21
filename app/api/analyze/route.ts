@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Type } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { getGenAIClient, CHAT_MODEL, NO_THINKING } from "@/lib/llm";
 import { PRODUCT } from "@/lib/product";
 import type { ChatMessage, CallAnalysis, SalesStatus } from "@/lib/types";
@@ -12,6 +12,31 @@ const STATUSES: SalesStatus[] = [
   "Demo Requested",
   "No Response",
 ];
+
+const RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    summary: { type: Type.STRING },
+    customerRequirements: { type: Type.STRING },
+    objections: { type: Type.STRING },
+    nextSteps: { type: Type.STRING },
+    status: { type: Type.STRING, enum: STATUSES },
+  },
+  required: ["summary", "customerRequirements", "objections", "nextSteps", "status"],
+};
+
+function runAnalysis(ai: GoogleGenAI, prompt: string, withThinking: boolean) {
+  return ai.models.generateContent({
+    model: CHAT_MODEL,
+    contents: prompt,
+    config: {
+      maxOutputTokens: 1000,
+      ...(withThinking ? { thinkingConfig: NO_THINKING } : {}),
+      responseMimeType: "application/json",
+      responseSchema: RESPONSE_SCHEMA,
+    },
+  });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -43,26 +68,19 @@ Analyze this call: summarize how it went in 2-3 sentences, capture what the cust
 need or care about (or "None mentioned"), capture any concerns or objections raised (or "None
 raised"), recommend a short next step for the sales team, and classify the final sales status.`;
 
-    const result = await ai.models.generateContent({
-      model: CHAT_MODEL,
-      contents: prompt,
-      config: {
-        maxOutputTokens: 1000,
-        thinkingConfig: NO_THINKING,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            summary: { type: Type.STRING },
-            customerRequirements: { type: Type.STRING },
-            objections: { type: Type.STRING },
-            nextSteps: { type: Type.STRING },
-            status: { type: Type.STRING, enum: STATUSES },
-          },
-          required: ["summary", "customerRequirements", "objections", "nextSteps", "status"],
-        },
-      },
-    });
+    // Not all models accept thinkingConfig (some lite models reject it
+    // outright), so try with it first and fall back without it.
+    let result;
+    try {
+      result = await runAnalysis(ai, prompt, true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("INVALID_ARGUMENT")) {
+        result = await runAnalysis(ai, prompt, false);
+      } else {
+        throw err;
+      }
+    }
 
     const raw = (result.text ?? "").trim();
 

@@ -1,6 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
+import { GoogleGenAI } from "@google/genai";
 import { getGenAIClient, CHAT_MODEL, NO_THINKING, buildSalesSystemPrompt } from "@/lib/llm";
 import type { ChatMessage } from "@/lib/types";
+
+function sendChatTurn(
+  ai: GoogleGenAI,
+  history: { role: "user" | "model"; parts: { text: string }[] }[],
+  message: string,
+  withThinking: boolean
+) {
+  const chat = ai.chats.create({
+    model: CHAT_MODEL,
+    history,
+    config: {
+      systemInstruction: buildSalesSystemPrompt(),
+      maxOutputTokens: 300,
+      ...(withThinking ? { thinkingConfig: NO_THINKING } : {}),
+    },
+  });
+  return chat.sendMessage({ message });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,17 +43,20 @@ export async function POST(req: NextRequest) {
       })),
     ];
 
-    const chat = ai.chats.create({
-      model: CHAT_MODEL,
-      history,
-      config: {
-        systemInstruction: buildSalesSystemPrompt(),
-        maxOutputTokens: 200,
-        thinkingConfig: NO_THINKING,
-      },
-    });
+    // Not all models accept thinkingConfig (some lite models reject it
+    // outright), so try with it first and fall back without it.
+    let result;
+    try {
+      result = await sendChatTurn(ai, history, last.text, true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("INVALID_ARGUMENT")) {
+        result = await sendChatTurn(ai, history, last.text, false);
+      } else {
+        throw err;
+      }
+    }
 
-    const result = await chat.sendMessage({ message: last.text });
     const reply = (result.text ?? "").trim() || "Sorry, could you say that again?";
 
     return NextResponse.json({ reply });
